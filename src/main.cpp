@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <FastLED.h>
 #include <WiFiManager.h>
-
+#include <Wire.h>
+#include <BH1750.h>
+#include "Ticker.h"
 
 // Timezone config
 /* 
@@ -12,6 +14,8 @@
 const char* NTP_SERVER = "ch.pool.ntp.org";
 const char* TZ_INFO    = "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00";  // Switzerland
 
+Ticker timer;
+#define TIMER_PERIOD 5
 
 // Wifi
 WiFiManager wm;   // looking for credentials? don't need em! ... google "ESP32 WiFiManager"
@@ -26,7 +30,26 @@ CRGB leds[NUM_LEDS];
 int global_brightness = (MAX_BRIGHTNESS-MIN_BRIGHTNESS)/2;
 int max_brightness = MAX_BRIGHTNESS;
 int min_brightness = MIN_BRIGHTNESS;
+int brightness;
+float lux_adjustment = 1.0;
 bool night_mode = false;
+int count = 0;
+int fade = 0;
+
+BH1750 lightMeter;
+
+static const uint8_t digits[] = {
+  0b01111101, // 0
+  0b00001001, // 1
+  0b01111010, // 2
+  0b00111011, // 3
+  0b00001111, // 4
+  0b00110111, // 5
+  0b01110111, // 6
+  0b00011001, // 7
+  0b01111111, // 8
+  0b00111111, // 9
+};
 
 // Time 
 tm timeinfo;
@@ -37,6 +60,8 @@ int second = 0;
 
 // Time, date, and tracking state
 int last_minute=0;
+
+
 
 String getFormattedDate(){
   char time_output[30];
@@ -139,11 +164,34 @@ void ConnectToWifi(){
   }
 }
 
+void timerStatusMessage(){
+  Serial.printf("FPS: %d\n", FastLED.getFPS());
+  Serial.printf("brightness: %d  global_brightness: %d\n", brightness, global_brightness);
+  Serial.printf("lux_adjustment: %f\n", lux_adjustment);
+  Serial.printf("night_mode: %s\n", night_mode ? "true" : "false");
+  Serial.printf("fade: %d\n", fade);
+  int avg_brightness = 0;
+  int lit_count = 0;
+  for (int i=0; i<NUM_LEDS; i++){
+    if (leds[i].getAverageLight() > 0){
+      lit_count++;
+      avg_brightness += leds[i].getAverageLight();
+    }
+  }
+  avg_brightness = lit_count > 0 ? avg_brightness / lit_count : 0;
+  Serial.printf("avg_brightness: %d\n", avg_brightness);
+
+  float lux = lightMeter.readLightLevel();
+  Serial.print("Light: ");
+  Serial.print(lux);
+  Serial.println(" lx");
+}
+
 void setup() {
   // set up fastled
   Serial.begin(115200);
   FastLED.addLeds<WS2812B, 5, GRB>(leds, NUM_LEDS);
-  FastLED.setBrightness(100);
+  FastLED.setBrightness(180);
 
   pinMode(0, INPUT_PULLUP);
 
@@ -152,20 +200,14 @@ void setup() {
   ConnectToWifi();
   delay(200);
 
+  // Initialize the I2C bus (BH1750 library doesn't do this automatically)
+  // On esp8266 devices you can select SCL and SDA pins using Wire.begin(D4, D3);
+  Wire.begin();
+  lightMeter.begin();
+
+  timer.attach(TIMER_PERIOD, timerStatusMessage);
 }
 
-static const uint8_t digits[] = {
-  0b01111101, // 0
-  0b00001001, // 1
-  0b01111010, // 2
-  0b00111011, // 3
-  0b00001111, // 4
-  0b00110111, // 5
-  0b01110111, // 6
-  0b00011001, // 7
-  0b01111111, // 8
-  0b00111111, // 9
-};
 
 void show_number(uint8_t digit, uint8_t num){
   int offset = digit * LEDS_PER_DIGIT;
@@ -176,19 +218,31 @@ void show_number(uint8_t digit, uint8_t num){
       int led_num = offset + i*3 + pos;
       float angle = sin(millis()/1000.0+(led_num/30.0));
       float angle2 = cos(millis()/15000.0+led_num/30.0);
-      int brightness;
+      brightness = 0;
+      uint8_t c;
       if (night_mode) {
         brightness = global_brightness;
+        c = color;
       } else {
         brightness = map(angle*100, -100, 100, global_brightness*0.7, global_brightness*1.2);;
+        c = (color+(int)(angle2*25))%255;
       }
       
-      brightness = constrain(brightness, max_brightness, min_brightness);
+      brightness = constrain(brightness, min_brightness, max_brightness);
       // Serial.printf("color: %d ", color);
       // Serial.println();
 
       if (digits[num] & (1 << i)){
-        leds[led_num] = CHSV((color+(int)(angle2*25))%65535, 240, brightness);
+        if (night_mode){
+          if (pos == 1){
+            leds[led_num] = CHSV(c, 240, brightness);
+          } else {
+            leds[led_num] = CHSV(c, 240, brightness*0.6);
+          }
+        } else {
+          leds[led_num] = CHSV(c, 240, brightness * lux_adjustment);
+        } 
+        
       } else {
         leds[led_num] = CRGB::Black;
       }
@@ -203,8 +257,6 @@ void display_time(){
   show_number(0, timeinfo.tm_min % 10);
 }
 
-int count = 0;
-int fade = 0;
 
 void loop() {
   // update time
@@ -241,34 +293,28 @@ void loop() {
     display_time();
   }
 
-  if (night_mode){
-    max_brightness = MAX_BRIGHTNESS/2;
-    min_brightness = MIN_BRIGHTNESS/2;
-  } else {
-    max_brightness = MAX_BRIGHTNESS;
-    min_brightness = MIN_BRIGHTNESS;  
-  }
   FastLED.show();  
 
-  // check for night mode if the time is between 8pm and 7am
-  if (timeinfo.tm_hour >= 20 || timeinfo.tm_hour < 7){
+  // check for night mode 
+  float lux = lightMeter.readLightLevel();
+  lux = constrain(lux, 0, 300);
+  if (lux < 10){
     night_mode = true;
   } else {
     night_mode = false;
   }
 
+  if (night_mode){
+    max_brightness = 35;
+    min_brightness = 30;
+  } else {
+    lux_adjustment = map(lux, 0, 130, 50, 100)/100.0;
+    lux_adjustment = constrain(lux_adjustment, 0.5, 1.0);
+    max_brightness = MAX_BRIGHTNESS * lux_adjustment;
+    min_brightness = MIN_BRIGHTNESS * lux_adjustment;  
+  }
+  
   delay(10);
 
   count++;
-  if (count % 300 == 0){
-    Serial.printf("FPS: %d\n", FastLED.getFPS());
-    if (fade != 0) Serial.printf("fade: %d\n", fade);
-    Serial.printf("brightness: %d   count: %d   night_mode: %s\n", global_brightness, count, night_mode ? "true" : "false");
-    int avg_brightness = 0;
-    for (int i=0; i<NUM_LEDS; i++){
-      avg_brightness += leds[i].getAverageLight();
-    }
-    avg_brightness /= NUM_LEDS;
-    Serial.printf("avg_brightness: %d\n", avg_brightness);
-  }
 }
