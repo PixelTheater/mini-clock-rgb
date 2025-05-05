@@ -1,0 +1,663 @@
+esphome:
+  name: mini-clock-rgb
+  friendly_name: Mini Clock RGB
+  platformio_options:
+    upload_speed: 900000
+    build_flags: -Wno-deprecated-declarations
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  # platform: esphome # This is the default, so technically optional, but good practice
+  encryption:
+    key: !secret api_key # Use the secret value
+
+ota:
+  platform: esphome # Specify the platform
+  password: !secret ota_password # Use the secret value
+
+wifi:
+  # Setup Wi-Fi using credentials stored from WiFiManager or captive portal
+  # If you want to hardcode credentials, uncomment and replace:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback captive portal if connection fails
+  ap:
+    ssid: "Mini-Clock-RGB Fallback"
+    password: "fallback-password" # Change this password
+
+# I2C Bus for BH1750
+i2c:
+  sda: ${i2c_sda_pin} # Use substitution
+  scl: ${i2c_scl_pin} # Use substitution
+  scan: true
+  id: bus_a
+
+# Timekeeping
+time:
+  - platform: sntp
+    id: sntp_time
+    servers: !secret ntp_server
+    timezone: !secret timezone
+
+binary_sensor:
+  - platform: gpio
+    pin: 25
+    name: "Microwave Sensor"
+    id: microwave_sensor_1
+    device_class: motion
+    filters:
+      - delayed_off: 10s # wait for 10 seconds without motion to send OFF.
+      # Play with this value, to find the right balance.
+      # For bed/bathroom or office it could be higher.
+
+  # NEW: Template Binary Sensor to report actual night mode state
+  - platform: template
+    name: "Clock Night Mode Active"
+    id: clock_night_mode_active
+    lambda: |-
+      // Read dependencies
+      bool night_mode_enabled = id(night_mode_enabled_switch).state;
+      int ambient_target = id(current_target_brightness_int);
+      float night_target_threshold = id(night_target_brightness).state;
+
+      // Determine actual state
+      bool is_active = night_mode_enabled && (ambient_target <= night_target_threshold);
+      return is_active;
+
+# Light Sensor - Calculates target brightness, then applies min(sensor_target, ha_level)
+sensor:
+  - platform: bh1750
+    name: "Ambient Light"
+    id: ambient_light_sensor
+    address: ${bh1750_address}
+    update_interval: 5s
+    # Add filter for smoothing
+    filters:
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 1
+    on_value:
+      then: # RE-ENABLED with new logic
+        - lambda: |-
+            #include <cmath>   // For round, fabsf, lerp
+            #include <algorithm> // For std::min, std::max
+            #include <esphome/core/helpers.h> // For esphome::clamp, esphome::lerp
+
+            static bool currently_night_mode = false; // Track mode for logging transitions
+
+            float lux = x;
+            // ESP_LOGD("sensor.on_value", "Lux changed: %.1f", lux);
+
+            if (!id(sntp_time).now().is_valid()) {
+              ESP_LOGW("sensor.on_value", "Time not valid yet, skipping brightness adjustment.");
+              return;
+            }
+
+            // Get configuration from number components
+            float day_max_b = id(day_max_brightness).state;
+            float night_target_b = id(night_target_brightness).state;
+            float night_thresh_lux = id(lux_night_threshold).state;
+
+            // Get configuration from substitutions
+            float min_vis_level = ${min_visible_level}; // 0.0-1.0 scale
+            float lux_high = ${lux_high_threshold};
+            // Convert min_visible_level to 0-255 scale for calculations
+            float min_vis_b = min_vis_level * 255.0f;
+
+            int target_brightness_255; // Final target brightness (0-255)
+
+            // Determine mode based on lux and threshold
+            bool now_is_night = (lux < night_thresh_lux);
+            if (now_is_night) {
+              // --- Night Mode ---
+              if (!currently_night_mode) {
+                ESP_LOGI("sensor.on_value", "Night Mode Activated (Lux < %.1f)", night_thresh_lux);
+                currently_night_mode = true;
+              }
+              // ESP_LOGD("sensor.on_value", "Night Mode Active (Lux < %.1f)", night_thresh_lux);
+              target_brightness_255 = round(night_target_b);
+              // Clamp night brightness between 1 and the configured max (safety check)
+              target_brightness_255 = esphome::clamp(target_brightness_255, 1, (int)id(night_target_brightness).traits.get_max_value());
+            } else {
+              // --- Day Mode ---
+              // ESP_LOGD("sensor.on_value", "Day Mode Active (Lux >= %.1f)", night_thresh_lux);
+              // Clamp lux input for mapping (use lux_high, allow some overshoot)
+              float lux_clamped = esphome::clamp(lux, 0.0f, lux_high * 1.5f);
+              float brightness_factor; // Factor from 0.0 to 1.0
+
+              if (lux_high <= 0.0f) { // Avoid division by zero if threshold is bad
+                  brightness_factor = 0.0f;
+              } else {
+                  // Calculate factor based on clamped lux relative to high threshold
+                  brightness_factor = (lux_clamped - 0.0f) / (lux_high - 0.0f);
+              }
+              // Clamp factor to be between 0.0 and 1.0
+              brightness_factor = esphome::clamp(brightness_factor, 0.0f, 1.0f);
+
+              // Map the factor to the brightness range [min_visible_b, day_max_b]
+              target_brightness_255 = round(esphome::lerp(brightness_factor, min_vis_b, day_max_b));
+              // Clamp final brightness between 1 and the configured max (safety check)
+              target_brightness_255 = esphome::clamp(target_brightness_255, 1, (int)day_max_b);
+            }
+
+            // --- Store and Apply Brightness ---
+            id(current_target_brightness_int) = target_brightness_255; // Store raw target for display lambda
+
+            // REMOVED the redundant light call - display lambda handles brightness application
+            /*
+            // Determine the final level to set for the *light component*
+            float final_level;
+            const float MIN_LEVEL_FOR_LOW_STEPS = 4.0f / 255.0f; // Use brightness level 4 for steps 1, 2, 3
+
+            if (target_brightness_255 <= 3) {
+              final_level = MIN_LEVEL_FOR_LOW_STEPS;
+            } else {
+              final_level = target_brightness_255 / 255.0f;
+            }
+            final_level = esphome::clamp(final_level, 0.0f, 1.0f); // Ensure valid
+
+            // Get the actual current brightness level of the light strip
+            float current_actual_level = id(led_strip)->current_values.get_brightness();
+
+            // Apply the change only if the final level is significantly different
+            if (fabsf(final_level - current_actual_level) > 0.01) {
+               // ESP_LOGD("sensor.on_value", "Calculated Target Brightness: %d/255 (Level: %.3f). Applying update (Current Level: %.3f).",
+               //         target_brightness_255, final_level, current_actual_level);
+               auto call = id(led_strip).make_call();
+               call.set_brightness(final_level);
+               call.set_transition_length(100); // Smoother transition
+               call.set_state(true); // Ensure light is ON
+               call.perform();
+            } else {
+               ESP_LOGV("sensor.on_value", "Calculated level %.3f is close enough to current %.3f. No change needed.", final_level, current_actual_level);
+            }
+            */
+  - platform: template
+    name: "Clock Actual Brightness"
+    id: clock_actual_brightness_sensor
+    unit_of_measurement: "/255"
+    accuracy_decimals: 0
+    filters:
+      - throttle: 5s
+    # No lambda needed here, state is published from display lambda
+
+# Global variable to store the calculated target brightness (0-255)
+globals:
+  - id: current_target_brightness_int
+    type: int
+    restore_value: no # No need to restore, calculated frequently
+    initial_value: '100' # Default to a reasonable value
+  # REMOVED original current_color_r/g/b globals
+  # NEW: Globals to store the HA-set state (brightness 0.0-1.0, color 0.0-1.0)
+  - id: ha_set_brightness
+    type: float
+    restore_value: yes # Restore HA brightness setting
+    initial_value: '1.0' # Default ON
+  - id: ha_set_color_r
+    type: float
+    restore_value: yes # Restore HA color setting
+    initial_value: '1.0' # Default Red
+  - id: ha_set_color_g
+    type: float
+    restore_value: yes
+    initial_value: '1.0' # Default Green
+  - id: ha_set_color_b
+    type: float
+    restore_value: yes
+    initial_value: '1.0' # Default Blue (makes white initially)
+
+  # NEW: Globals for fade control
+  - id: fade_active
+    type: bool
+    restore_value: no # Fade state is transient
+    initial_value: 'false'
+  - id: fade_is_fade_in
+    type: bool
+    restore_value: no
+    initial_value: 'false' # Doesn't matter much, set on trigger
+  - id: fade_start_time
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+  - id: fade_start_brightness # Brightness scale (0-1) when fade was triggered
+    type: float
+    restore_value: no
+    initial_value: '1.0' # Assume starts on
+  - id: fade_current_brightness # Current brightness scale (0-1) during fade, updated by display lambda
+    type: float
+    restore_value: yes # Restore last known brightness scale from potential fade
+    initial_value: '1.0' # Assume starts on and bright
+
+# Addressable Light Strip (FastLED) and Color Control
+light:
+  # This is the actual LED strip controller (internal)
+  - platform: fastled_clockless
+    internal: true # Make this light internal - not directly exposed to HA
+    id: led_strip
+    chipset: WS2812B
+    pin: ${led_pin}
+    num_leds: ${num_leds}
+    rgb_order: GRB
+    name: "Clock LEDs (Internal)"
+    gamma_correct: 1.0 # Disable gamma correction for testing
+    # effects: are not needed as color is controlled via template light
+
+  # NEW: RGB Light linked to template outputs for HA Color Control
+  - platform: rgb
+    name: "Clock Color"
+    id: clock_color_rgb
+    red: dummy_output_r
+    green: dummy_output_g
+    blue: dummy_output_b
+    default_transition_length: 0s
+    restore_mode: RESTORE_DEFAULT_ON
+
+    # REINSTATE and MODIFY on_state trigger
+    on_state:
+      - lambda: |-
+          auto values = id(clock_color_rgb).current_values;
+          float new_brightness = values.get_brightness();
+          bool new_is_on = values.is_on();
+
+          // Get previous target state from our global
+          // Use fade_current_brightness as the *actual* current visual state for comparison
+          // Use ha_set_brightness as the *target* state for comparison
+          float previous_target_brightness = id(ha_set_brightness);
+          bool previous_target_is_on = (previous_target_brightness >= 0.001f);
+
+          ESP_LOGD("light.on_state", "State Change Received. New On: %s, New B: %.3f | Prev Target On: %s, Prev Target B: %.3f | Fade Active: %s",
+                   new_is_on ? "true" : "false", new_brightness,
+                   previous_target_is_on ? "true" : "false", previous_target_brightness,
+                   id(fade_active) ? "true" : "false");
+
+          // Check for state changes (ON->OFF or OFF->ON)
+          if (new_is_on && !previous_target_is_on) {
+            // --- State Change: OFF -> ON ---
+            ESP_LOGD("light.on_state", "Transition detected: OFF -> ON");
+            // Store color immediately
+            id(ha_set_color_r) = values.get_red();
+            id(ha_set_color_g) = values.get_green();
+            id(ha_set_color_b) = values.get_blue();
+            // Store the *target* brightness for HA state
+            id(ha_set_brightness) = new_brightness; // Store the brightness from HA
+            // Start fade-in animation
+            id(fade_start_brightness) = id(fade_current_brightness); // Start fade from the *current* visual level
+            id(fade_is_fade_in) = true;
+            id(fade_start_time) = millis();
+            id(fade_active) = true;
+            ESP_LOGD("light.on_state", "Starting fade-in from %.3f towards %.3f", id(fade_start_brightness), new_brightness);
+
+          } else if (!new_is_on && previous_target_is_on) {
+            // --- State Change: ON -> OFF ---
+            ESP_LOGD("light.on_state", "Transition detected: ON -> OFF");
+            // Set the *target* brightness for HA state
+            id(ha_set_brightness) = 0.0f;
+            // Start fade-out animation
+            id(fade_start_brightness) = id(fade_current_brightness); // Start fade from the *current* visual level
+            id(fade_is_fade_in) = false;
+            id(fade_start_time) = millis();
+            id(fade_active) = true;
+            ESP_LOGD("light.on_state", "Starting fade-out from %.3f", id(fade_start_brightness));
+
+          } else if (new_is_on) {
+            // --- No State Change (Still ON) --- Just update parameters if not fading
+            if (!id(fade_active)) {
+              ESP_LOGD("light.on_state", "Updating parameters while ON (Fade not active)");
+              // Update target brightness if it changed
+              if (fabsf(new_brightness - previous_target_brightness) > 0.001f) {
+                 id(ha_set_brightness) = new_brightness;
+                 // Also update the current visual brightness immediately if not fading
+                 id(fade_current_brightness) = new_brightness;
+              }
+              // Update color immediately
+              id(ha_set_color_r) = values.get_red();
+              id(ha_set_color_g) = values.get_green();
+              id(ha_set_color_b) = values.get_blue();
+            } else {
+              ESP_LOGD("light.on_state", "Parameter change ignored during active fade.");
+              // Maybe store the latest brightness/color requested during fade to apply afterwards?
+              // For now, we ignore changes during fade.
+            }
+          } else {
+            // --- No State Change (Still OFF) ---
+            // Do nothing if the light is already off and receives another off command
+            ESP_LOGD("light.on_state", "Ignoring update while already OFF.");
+          }
+
+# Display Platform - Simplified Color
+display:
+  - platform: addressable_light
+    id: clock_display
+    addressable_light_id: led_strip
+    width: ${num_leds} # Use substitution
+    height: 1
+    update_interval: 33ms # Return to faster updates (~30 FPS)
+    lambda: |-
+      // --- Define Constants Early --- Requires num_leds for animation
+      const int total_leds = ${num_leds};
+      const int leds_per_segment = ${leds_per_segment}; // Need this for animation step
+
+      // --- Time Check & Startup Animation ---
+      static int animation_offset = total_leds - 1; // Start offset at the end for reverse
+      static int animation_skip = 0; // Skip every nth frames
+      if (!id(sntp_time).now().is_valid()) {
+        // Time not valid, run startup animation
+        it.fill(Color::BLACK); // Clear display
+
+        // Marquee effect parameters
+        int cycle_len = leds_per_segment * 8; // Length of on/off pattern cycle
+        int lit_len = leds_per_segment;      // Number of LEDs to light within cycle
+
+        // Loop through all LEDs and apply marquee pattern
+        for (int i = 0; i < total_leds; ++i) {
+          // Calculate position relative to the moving offset within the repeating cycle
+          int relative_pos = (i - animation_offset + total_leds) % cycle_len;
+          Color anim_color = Color(relative_pos*2+5, 5, 5); // White
+
+          // Light the pixel if it falls within the lit portion of the cycle
+          if (relative_pos < lit_len) {
+            it.draw_pixel_at(i, 0, anim_color);
+          }
+          // else: leave it black (already filled)
+        }
+
+        // Decrement the offset to move the pattern backwards each frame
+        animation_skip = (animation_skip + 1) % 3; // Skip every 10 frames
+        if (animation_skip == 0){
+          animation_offset = (animation_offset - 1 + total_leds) % total_leds;
+        }
+        return; // Skip normal clock drawing
+      }
+
+      // --- Time IS Valid - Proceed with Clock Display ---
+      // Reset animation offset for next potential startup
+      animation_offset = total_leds - 1; // Reset to the end
+
+      auto time_now = id(sntp_time).now();
+      int hour = time_now.hour;
+      int minute = time_now.minute;
+
+      // --- Calculate Effective HA Brightness Scale (considering fade) ---
+      float effective_ha_scale = id(ha_set_brightness); // Start with the target HA state
+      if (id(fade_active)) {
+        unsigned long elapsed = millis() - id(fade_start_time);
+        float progress = esphome::clamp((float)elapsed / ${fade_duration_ms}, 0.0f, 1.0f);
+        float start_b = id(fade_start_brightness);
+        // Use the actual HA target brightness for fade-in target
+        float target_b = id(fade_is_fade_in) ? id(ha_set_brightness) : 0.0f;
+        // Update the global continuously during the fade
+        id(fade_current_brightness) = esphome::lerp(progress, start_b, target_b);
+        effective_ha_scale = id(fade_current_brightness); // Use the calculated fade value
+
+        if (progress >= 1.0f) {
+          id(fade_active) = false; // Fade finished
+          // Ensure final value is set exactly
+          id(fade_current_brightness) = target_b;
+          effective_ha_scale = target_b;
+          ESP_LOGD("display.lambda", "Fade %s finished.", id(fade_is_fade_in) ? "in" : "out");
+        }
+      } else {
+         // If fade is not active, ensure current brightness reflects the target HA state
+         id(fade_current_brightness) = id(ha_set_brightness);
+      }
+
+      // --- Check for Effective OFF state FIRST --- (Use effective_ha_scale)
+      if (effective_ha_scale < 0.001f) {
+        it.fill(Color::BLACK); // Force black if HA light is effectively OFF
+        // Publish 0 brightness if we are forcing black
+        id(clock_actual_brightness_sensor).publish_state(0);
+        return; // Skip further calculations
+      }
+
+      // --- HA Light is Effectively ON, proceed with color/brightness ---
+      // Read color globals (set by on_turn_on trigger)
+      float cached_r = id(ha_set_color_r);
+      float cached_g = id(ha_set_color_g);
+      float cached_b = id(ha_set_color_b);
+
+      // --- Calculate Final Target Brightness (using effective_ha_scale) ---
+      int ambient_target_brightness = id(current_target_brightness_int);
+      float night_target_max = id(night_target_brightness).state;
+      // Check if night mode is enabled via the switch AND ambient level suggests night
+      bool night_mode_active = id(night_mode_enabled_switch).state && (ambient_target_brightness <= night_target_max);
+
+      int final_target_brightness;
+      if (night_mode_active) {
+        // Night mode is enabled and active: Use ambient target directly.
+        final_target_brightness = ambient_target_brightness;
+      } else {
+        // Day mode OR Night mode disabled: Scale ambient by effective HA scale
+        float scaled_brightness = ambient_target_brightness * effective_ha_scale;
+        // Apply minimum visible level based on the raw ambient target before rounding
+        // (Using min_visible_level substitution which is 0.0-1.0 scale)
+        float ambient_level = ambient_target_brightness / 255.0f;
+        if (ambient_level > 0.001f && scaled_brightness < (ambient_target_brightness * ${min_visible_level})) {
+            scaled_brightness = ambient_target_brightness * ${min_visible_level};
+            // Ensure scaled brightness doesn't exceed the original ambient target
+            scaled_brightness = std::min((float)ambient_target_brightness, scaled_brightness);
+        }
+        // Ensure minimum of 1.0 pre-round if it's supposed to be on at all
+        if (effective_ha_scale > 0.001f && scaled_brightness < 1.0f) {
+             scaled_brightness = 1.0f;
+        }
+        final_target_brightness = round(scaled_brightness);
+      }
+
+      // Clamp final brightness 0-255
+      final_target_brightness = esphome::clamp(final_target_brightness, 0, 255);
+      // This check might be redundant now due to the effective_ha_scale check earlier, but safe to keep
+      if (effective_ha_scale < 0.001f) { final_target_brightness = 0; }
+
+      // Publish the final brightness to the template sensor
+      id(clock_actual_brightness_sensor).publish_state(final_target_brightness);
+
+      // --- Determine Draw Color and LED State ---
+      float r_base = cached_r;
+      float g_base = cached_g;
+      float b_base = cached_b;
+      Color final_draw_color;
+      bool draw_led0, draw_led1, draw_led2;
+      if (final_target_brightness <= 0) {
+        final_draw_color = Color::BLACK;
+        draw_led0 = draw_led1 = draw_led2 = false;
+        // ESP_LOGV("display", "Final Target Brightness <= 0, Drawing BLACK (Ambient: %d, HA Scale: %.3f)",
+        //          ambient_target_brightness, effective_ha_scale); // Use variable
+      } else if (final_target_brightness <= 3) {
+        // --- Digital Dimming Steps 1, 2, 3 ---
+        const float MIN_INTENSITY_FACTOR = 4.0f;
+        // ESP_LOGV("display_calc", "DigiDim: Base(%.3f,%.3f,%.3f) * Factor %.1f", r_base, g_base, b_base, MIN_INTENSITY_FACTOR);
+        uint8_t r_int = (uint8_t) esphome::clamp(r_base * MIN_INTENSITY_FACTOR, 0.0f, 255.0f);
+        uint8_t g_int = (uint8_t) esphome::clamp(g_base * MIN_INTENSITY_FACTOR, 0.0f, 255.0f);
+        uint8_t b_int = (uint8_t) esphome::clamp(b_base * MIN_INTENSITY_FACTOR, 0.0f, 255.0f);
+        final_draw_color = Color(r_int, g_int, b_int);
+        draw_led1 = (final_target_brightness == 1 || final_target_brightness == 3);
+        draw_led0 = (final_target_brightness == 2 || final_target_brightness == 3);
+        draw_led2 = (final_target_brightness == 2 || final_target_brightness == 3);
+        // ESP_LOGD("display", "Final Int: %d -> Digital Dimming: Calc(%d,%d,%d) -> Color(%d,%d,%d), LEDs(%d,%d,%d) (Ambient: %d, HA Scale: %.3f)",
+        //          final_target_brightness, r_int, g_int, b_int, final_draw_color.r, final_draw_color.g, final_draw_color.b, draw_led0, draw_led1, draw_led2,
+        //          ambient_target_brightness, effective_ha_scale);
+      } else {
+        // --- Normal Brightness Steps (> 3) ---
+        float final_level = final_target_brightness / 255.0f;
+        // ESP_LOGV("display_calc", "NormBright: Base(%.3f,%.3f,%.3f) * Level %.3f", r_base, g_base, b_base, final_level);
+        uint8_t r_int = (uint8_t) esphome::clamp(r_base * final_level * 255.0f, 0.0f, 255.0f);
+        uint8_t g_int = (uint8_t) esphome::clamp(g_base * final_level * 255.0f, 0.0f, 255.0f);
+        uint8_t b_int = (uint8_t) esphome::clamp(b_base * final_level * 255.0f, 0.0f, 255.0f);
+        final_draw_color = Color(r_int, g_int, b_int);
+        draw_led0 = draw_led1 = draw_led2 = true;
+        // ESP_LOGD("display", "Final Int: %d -> Normal Brightness: Level %.3f -> Calc(%d,%d,%d) -> Color(%d,%d,%d) (Ambient: %d, HA Scale: %.3f)",
+        //          final_target_brightness, final_level, r_int, g_int, b_int, final_draw_color.r, final_draw_color.g, final_draw_color.b,
+        //          ambient_target_brightness, effective_ha_scale);
+      }
+
+      // --- Drawing Logic ---
+      // Define segment patterns
+      static const uint8_t digits[] = {
+        0b01111101, 0b00001001, 0b01111010, 0b00111011, 0b00001111, // 0-4
+        0b00110111, 0b01110111, 0b00011001, 0b01111111, 0b00111111  // 5-9
+      };
+      const int segments_per_digit = 7;
+      const int leds_per_digit = leds_per_segment * segments_per_digit;
+
+      // Clear display buffer
+      it.fill(Color::BLACK);
+
+      // Extract digits
+      int h1 = hour / 10;
+      int h2 = hour % 10;
+      int m1 = minute / 10;
+      int m2 = minute % 10;
+      uint8_t time_digits[] = {m2, m1, h2, h1};
+
+      // Render digits
+      for (int digit_index = 0; digit_index < 4; ++digit_index) {
+        int digit_offset = digit_index * leds_per_digit;
+        uint8_t number_to_display = time_digits[digit_index];
+        if (number_to_display > 9) continue;
+        uint8_t digit_pattern = digits[number_to_display];
+
+        for (int segment_index = 0; segment_index < segments_per_digit; ++segment_index) {
+          int segment_offset = digit_offset + segment_index * leds_per_segment;
+
+          // Determine if this segment should be on or off based on the digit pattern
+          bool segment_on = (digit_pattern & (1 << segment_index));
+
+          if (segment_on) {
+            // Segment is ON
+            if (final_target_brightness <= 3 && leds_per_segment == 3) {
+              // --- Special Digital Dimming for 3 LEDs/segment ---
+              // Use pre-calculated bools for which LEDs to light for steps 1, 2, 3
+              int led0_idx = segment_offset + 0;
+              int led1_idx = segment_offset + 1;
+              int led2_idx = segment_offset + 2;
+              bool led0_valid = led0_idx < total_leds;
+              bool led1_valid = led1_idx < total_leds;
+              bool led2_valid = led2_idx < total_leds;
+
+              if (led0_valid) it.draw_pixel_at(led0_idx, 0, draw_led0 ? final_draw_color : Color::BLACK);
+              if (led1_valid) it.draw_pixel_at(led1_idx, 0, draw_led1 ? final_draw_color : Color::BLACK);
+              if (led2_valid) it.draw_pixel_at(led2_idx, 0, draw_led2 ? final_draw_color : Color::BLACK);
+            } else {
+              // --- Normal segment drawing (or digital dimming for segments != 3 LEDs) ---
+              // If brightness was <=3 but segment != 3 LEDs, final_draw_color was already calculated
+              // using MIN_INTENSITY_FACTOR, so all LEDs get that dim color.
+              for (int led_in_segment = 0; led_in_segment < leds_per_segment; ++led_in_segment) {
+                int current_led_index = segment_offset + led_in_segment;
+                if (current_led_index < total_leds) {
+                  it.draw_pixel_at(current_led_index, 0, final_draw_color);
+                }
+              }
+            }
+          } else {
+            // Segment is OFF - Turn all LEDs in the segment black
+            for (int led_in_segment = 0; led_in_segment < leds_per_segment; ++led_in_segment) {
+              int current_led_index = segment_offset + led_in_segment;
+              if (current_led_index < total_leds) {
+                it.draw_pixel_at(current_led_index, 0, Color::BLACK);
+              }
+            }
+          }
+        }
+      }
+
+# Add dummy outputs back to satisfy configuration requirements
+output:
+  - platform: template
+    id: dummy_output_r
+    type: float
+    write_action: [] # Required, must be a list (even empty)
+  - platform: template
+    id: dummy_output_g
+    type: float
+    write_action: [] # Required, must be a list (even empty)
+  - platform: template
+    id: dummy_output_b
+    type: float
+    write_action: [] # Required, must be a list (even empty)
+
+# Number components for configuration via HA (Restore this section)
+number:
+  - platform: template
+    name: "Day Max Brightness"
+    id: day_max_brightness
+    min_value: 1       # Min 1 to ensure it's not completely off
+    max_value: 255
+    step: 1
+    mode: box          # Use box input mode in HA
+    initial_value: "200" # Default max brightness during day
+    optimistic: true   # Assume changes apply immediately
+    unit_of_measurement: "/255"
+    restore_value: yes # Save value across reboots
+
+  - platform: template
+    name: "Night Target Brightness"
+    id: night_target_brightness
+    min_value: 1       # Min 1 to ensure it's not completely off
+    max_value: 100     # Lower max for night mode makes sense
+    step: 1
+    mode: box
+    initial_value: "30"  # Default brightness during night
+    optimistic: true
+    unit_of_measurement: "/255"
+    restore_value: yes # Save value across reboots
+
+  - platform: template
+    name: "Lux Night Threshold"
+    id: lux_night_threshold
+    min_value: 0
+    max_value: 1000    # Adjust max based on sensor range if needed
+    step: 1
+    mode: box
+    initial_value: "10"  # Default lux level to switch to night mode
+    optimistic: true
+    unit_of_measurement: "lx"
+    restore_value: yes # Save value across reboots
+
+# Substitutions allow easy configuration
+substitutions:
+  # --- Device Specific ---
+  led_pin: "5"
+  i2c_sda_pin: "21"
+  i2c_scl_pin: "22"
+  bh1750_address: "0x23" # Or 0x5C
+  leds_per_segment: "3" # NEW: Number of LEDs in each 7-segment line
+  # IMPORTANT: num_leds MUST be manually updated if leds_per_segment changes!
+  # num_leds = 4 digits * 7 segments * leds_per_segment
+  num_leds: "84" # Default: 4*7*3
+
+  # --- Brightness Control (Original Auto settings, kept for reference) ---
+  # lux_low_threshold: "10"   # Lux level to trigger night mode
+  lux_high_threshold: "130" # Lux level for max brightness mapping (UNCOMMENTED)
+  # lux_remap_min_pct: "0.5"  # Min brightness multiplier (50%)
+  # lux_remap_max_pct: "1.0"  # Max brightness multiplier (100%)
+  # night_mode_max_brightness: "25" # Max brightness (0-255) in night mode
+  # night_mode_min_brightness: "1" # Min brightness (0-255) in night mode
+  # --- NEW: Manual Brightness Remapping ---
+  min_visible_level: "0.05" # Minimum brightness level (0.0-1.0) when HA slider is > 0%
+
+  # --- NEW: Fade Control ---
+  fade_duration_ms: "1000" # Duration for fade in/out in milliseconds
+
+# Switch to Enable/Disable Night Mode Logic
+switch:
+  - platform: template
+    name: "Night Mode Enabled"
+    id: night_mode_enabled_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON # Use restore_mode instead of restore_state
+    turn_on_action:
+      - lambda: |-
+          ESP_LOGI("switch", "Night Mode Enabled.");
+    turn_off_action:
+      - lambda: |-
+          ESP_LOGI("switch", "Night Mode Disabled (HA scale always applies).");
+

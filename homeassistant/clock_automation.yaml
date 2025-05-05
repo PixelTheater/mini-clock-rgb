@@ -1,0 +1,22 @@
+alias: clock color changer
+description: ""
+triggers:
+  - trigger: time_pattern
+    minutes: /5
+    hours: "*"
+conditions:
+  - condition: state
+    entity_id: automation.clock_color_changer
+    state: "on"
+actions:
+  - action: script.clock_color_changer
+    data: {}
+  - action: light.turn_on
+    metadata: {}
+    data:
+      hs_color: "{{ states('input_text.clock_hs_color') | from_json }}"
+      transition: 10
+    target:
+      entity_id:
+        - light.mini_clock_rgb_clock_color
+mode: single

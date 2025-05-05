@@ -1,0 +1,65 @@
+alias: Calculate Clock Color
+sequence:
+  - service: input_text.set_value
+    target:
+      entity_id: input_text.clock_hs_color # The helper you created
+    data:
+      value: >
+        {#- Define Keyframes: Time (minutes past midnight), Hue, Saturation -#}
+        {% set keyframes = [
+          {'min': 0*60,   'h': 250, 's': 90},
+          {'min': 4*60,   'h': 250, 's': 90},
+          {'min': 6*60,   'h': 30,  's': 100},
+          {'min': 9*60,   'h': 55,  's': 80},
+          {'min': 12*60,  'h': 200, 's': 50},
+          {'min': 15*60,  'h': 220, 's': 60},
+          {'min': 18*60,  'h': 25,  's': 100},
+          {'min': 21*60,  'h': 250, 's': 90},
+          {'min': 24*60,  'h': 250, 's': 100} {# Matches h value of midnight for wrap #}
+        ] %}
+
+        {#- Get current time in minutes past midnight -#}
+        {% set minutes_now = now().hour * 60 + now().minute %}
+
+        {#- Find the segment the current time falls into -#}
+        {% set start_kf = namespace(data=keyframes[-2]) %} {#- Default to last segment before wrap -#}
+        {% set end_kf = namespace(data=keyframes[-1]) %}
+        {% for i in range(keyframes | length - 1) %}
+          {% if keyframes[i].min <= minutes_now < keyframes[i+1].min %}
+            {% set start_kf.data = keyframes[i] %}
+            {% set end_kf.data = keyframes[i+1] %}
+            {% break %}
+          {% endif %}
+        {% endfor %}
+
+        {#- Extract values from dictionaries -#}
+        {% set start_min = start_kf.data.min %}
+        {% set end_min = end_kf.data.min %}
+        {% set start_h = start_kf.data.h %}
+        {% set end_h = end_kf.data.h %}
+        {% set start_s = start_kf.data.s %}
+        {% set end_s = end_kf.data.s %}
+
+        {#- Calculate interpolation factor (t) between 0.0 and 1.0 -#}
+        {% set segment_duration = end_min - start_min %}
+        {% set time_in_segment = minutes_now - start_min %}
+        {% set t = (time_in_segment / segment_duration) if segment_duration > 0 else 0 %}
+        {#- Clamp using correct function syntax -#}
+        {% set t = min(max(t, 0.0), 1.0) %}
+
+        {#- Interpolate Hue and Saturation (Hue logic inlined) -#}
+        {% set h1 = start_h %}
+        {% set h2 = end_h %}
+        {% set diff = h2 - h1 %}
+        {% if diff | abs > 180 %} {# Use abs filter here, it's fine #}
+          {% set diff = diff - 360 if diff > 0 else diff + 360 %}
+        {% endif %}
+        {% set result = (h1 + diff * t) %}
+        {% set final_h = result % 360 if result >= 0 else (result % 360) + 360 %}
+
+        {#- Interpolate Saturation -#}
+        {% set final_s = start_s + (end_s - start_s) * t %}
+
+        {#- Output the final HS list AS A STRING for input_text -#}
+        [ {{ final_h | round(1) }}, {{ final_s | round(1) }} ]
+mode: single
