@@ -1,4 +1,4 @@
-# Mini Clock RGB - ESPHome 7-Segment Clock
+# Mini Clock RGB - A Simple ESPHome 7-Segment RGB Clock Kit
 
 ESPHome includes support for addressable LED lights, as well as LED matrices. But what if you want to make a 7-segment clock using RGB LEDs?
 
@@ -8,7 +8,13 @@ All you need is to customize the YAML file to get started. It contains the setti
 
 The reference hardware used are custom made PCBs with WS2812 LEDs in series, but of course regular strips could be used to form the digits as well.
 
+For even cooler clocks that work with Home Assistant and ESPHome, check out [SolidDifference](https://soliddifference.com) and the [open source clock firmware](https://github.com/soliddifference/siebenuhr_core) it is based on. (disclaimer: I'm part of that collective &#9786;)
+
+![clock home assistant device panel](media/ha_panel.jpg)
+
 ![clock hardware image](media/clock_hero.jpg)
+
+<img src="media/two-pcbs.jpeg" width="32%" alt="the two PCBs"><img src="media/stackup.jpeg" width="32%" alt="PCBs stacked"><img src="media/transparency.jpeg" width="32%" alt="transparency with PCB">
 
 ## Project Components
 
