@@ -2,8 +2,17 @@
 #include <FastLED.h>
 #include <WiFiManager.h>
 #include <Wire.h>
+#ifdef BH1750_ENABLED
 #include <BH1750.h>
+#endif
 #include "Ticker.h"
+
+// BH1750 light sensor support
+// To enable: add -D BH1750_ENABLED=1 to build_flags in platformio.ini
+// or change the 0 to 1 in the line below
+#ifndef BH1750_ENABLED
+#define BH1750_ENABLED 0
+#endif
 
 // Timezone config
 /* 
@@ -19,6 +28,7 @@ Ticker timer;
 
 // Wifi
 WiFiManager wm;   // looking for credentials? don't need em! ... google "ESP32 WiFiManager"
+bool wifi_connected = false;
 
 #define NUM_DIGITS 4
 #define LEDS_PER_DIGIT 3*7
@@ -26,17 +36,24 @@ WiFiManager wm;   // looking for credentials? don't need em! ... google "ESP32 W
 #define MAX_BRIGHTNESS 200
 #define MIN_BRIGHTNESS 80
 
+#ifndef DOUT_PIN  // see platformio.ini for pin assignments by board type
+#define DOUT_PIN 5
+#endif
+
 CRGB leds[NUM_LEDS];
 int global_brightness = (MAX_BRIGHTNESS-MIN_BRIGHTNESS)/2;
 int max_brightness = MAX_BRIGHTNESS;
 int min_brightness = MIN_BRIGHTNESS;
 int brightness;
+float lux = 150;
 float lux_adjustment = 1.0;
 bool night_mode = false;
 int count = 0;
 int fade = 0;
 
+#if BH1750_ENABLED
 BH1750 lightMeter;
+#endif
 
 static const uint8_t digits[] = {
   0b01111101, // 0
@@ -135,8 +152,11 @@ void ConnectToWifi(){
   WiFi.mode(WIFI_STA);
   wm.setAPCallback(configModeCallback);
 
+  // Set timeout for WiFiManager to prevent indefinite blocking
+  wm.setConfigPortalTimeout(30); // 30 seconds timeout
+  
   //wm.resetSettings();   // uncomment to force a reset
-  bool wifi_connected = wm.autoConnect("Mini Clock RGB");
+  wifi_connected = wm.autoConnect("Mini Clock RGB");
   int t=0;
   if (wifi_connected){
     Serial.println();
@@ -160,6 +180,7 @@ void ConnectToWifi(){
     }
   } else {
     Serial.println("ERROR: WiFi connect failure");
+    Serial.println("Entering random number mode...");
     // update fastled display with error message
   }
 }
@@ -181,16 +202,18 @@ void timerStatusMessage(){
   avg_brightness = lit_count > 0 ? avg_brightness / lit_count : 0;
   Serial.printf("avg_brightness: %d\n", avg_brightness);
 
-  float lux = lightMeter.readLightLevel();
+#if BH1750_ENABLED
+  float sensor_lux = lightMeter.readLightLevel();
   Serial.print("Light: ");
-  Serial.print(lux);
+  Serial.print(sensor_lux);
   Serial.println(" lx");
+#endif
 }
 
 void setup() {
   // set up fastled
   Serial.begin(115200);
-  FastLED.addLeds<WS2812B, 5, GRB>(leds, NUM_LEDS);
+  FastLED.addLeds<WS2812B, DOUT_PIN, GRB>(leds, NUM_LEDS);
   FastLED.setBrightness(180);
 
   pinMode(0, INPUT_PULLUP);
@@ -200,10 +223,13 @@ void setup() {
   ConnectToWifi();
   delay(200);
 
+#if BH1750_ENABLED
   // Initialize the I2C bus (BH1750 library doesn't do this automatically)
   // On esp8266 devices you can select SCL and SDA pins using Wire.begin(D4, D3);
   Wire.begin();
   lightMeter.begin();
+  Serial.println("BH1750 light sensor initialized");
+#endif
 
   timer.attach(TIMER_PERIOD, timerStatusMessage);
 }
@@ -257,52 +283,121 @@ void display_time(){
   show_number(0, timeinfo.tm_min % 10);
 }
 
+void show_random_number(uint8_t digit, uint8_t num, uint16_t color){
+  int offset = digit * LEDS_PER_DIGIT;
+  
+  for (int i=0; i<7; i++){
+    for (int pos=0; pos<3; pos++){
+      int led_num = offset + i*3 + pos;
+      float angle = sin(millis()/1000.0+(led_num/30.0));
+      brightness = map(angle*100, -100, 100, global_brightness*0.7, global_brightness*1.2);
+      brightness = constrain(brightness, min_brightness, max_brightness);
+
+      if (digits[num] & (1 << i)){
+        leds[led_num] = CHSV(color, 240, brightness);
+      } else {
+        leds[led_num] = CRGB::Black;
+      }
+    }
+  }
+}
+
+void display_random_numbers(){
+  static unsigned long last_update = 0;
+  static int random_num = 0;
+  static uint16_t random_colors[4];
+  
+  // Update random number and colors every second
+  if (millis() - last_update >= 1000) {
+    random_num = random(10000);  // 0000-9999
+    for (int i = 0; i < 4; i++) {
+      random_colors[i] = random(256);  // Random hue for each digit
+    }
+    last_update = millis();
+    Serial.printf("Random number: %04d\n", random_num);
+  }
+  
+  // Display the 4-digit number with individual colors for each digit
+  show_random_number(3, (random_num / 1000) % 10, random_colors[3]);
+  show_random_number(2, (random_num / 100) % 10, random_colors[2]);
+  show_random_number(1, (random_num / 10) % 10, random_colors[1]);
+  show_random_number(0, random_num % 10, random_colors[0]);
+}
+
 
 void loop() {
-  // update time
-  time(&now);
-  localtime_r(&now, &timeinfo);
-
-  if (last_minute != timeinfo.tm_min){
-    last_minute = timeinfo.tm_min;
-    Serial.println(getFormattedTime());
-    fade = -1;
-    count = 0;
+  // Check if WiFi is still connected (in case it drops after initial connection)
+  if (wifi_connected && !WiFi.isConnected()) {
+    wifi_connected = false;
+    Serial.println("WiFi connection lost! Switching to random number mode...");
   }
+  
+  if (wifi_connected) {
+    // update time
+    time(&now);
+    localtime_r(&now, &timeinfo);
 
-  if (fade != 0){
-    // fade in or out
-    if (fade == 1) {
-      int amt = constrain(count,min_brightness/2,max_brightness);
-      global_brightness = amt;
-      display_time();
-    }
-    for (int i=0; i<NUM_LEDS; i++){
-      leds[i].fadeToBlackBy(random(1));
-    }
-    if (count >= MAX_BRIGHTNESS){
-      if (fade == 1){
-        fade = 0;  // stop fading
-        global_brightness = max_brightness;
-      }
-      if (fade == -1) fade = 1; // start fading in
+    if (last_minute != timeinfo.tm_min){
+      last_minute = timeinfo.tm_min;
+      Serial.println(getFormattedTime());
+      fade = -1;
       count = 0;
     }
+
+    if (fade != 0){
+      // fade in or out
+      if (fade == 1) {
+        int amt = constrain(count,min_brightness/2,max_brightness);
+        global_brightness = amt;
+        display_time();
+      }
+      for (int i=0; i<NUM_LEDS; i++){
+        leds[i].fadeToBlackBy(random(1));
+      }
+      if (count >= MAX_BRIGHTNESS){
+        if (fade == 1){
+          fade = 0;  // stop fading
+          global_brightness = max_brightness;
+        }
+        if (fade == -1) fade = 1; // start fading in
+        count = 0;
+      }
+    } else {
+      // display time
+      display_time();
+    }
   } else {
-    // display time
-    display_time();
+    // WiFi not connected - display random numbers
+    display_random_numbers();
+    
+    // Attempt to reconnect every 60 seconds
+    static unsigned long last_reconnect_attempt = 0;
+    if (millis() - last_reconnect_attempt >= 60000) {
+      Serial.println("Attempting WiFi reconnection...");
+      if (WiFi.isConnected()) {
+        wifi_connected = true;
+        Serial.println("WiFi reconnected! Switching back to time mode...");
+        // Get current time
+        if (getNTPtime(5)) {
+          Serial.println("Time sync complete after reconnection");
+        }
+      }
+      last_reconnect_attempt = millis();
+    }
   }
 
   FastLED.show();  
 
+#if BH1750_ENABLED
   // check for night mode 
-  float lux = lightMeter.readLightLevel();
-  lux = constrain(lux, 0, 300);
+  float sensor_lux = lightMeter.readLightLevel();
+  lux = constrain(sensor_lux, 0, 300);
   if (lux < 10){
     night_mode = true;
   } else {
     night_mode = false;
   }
+#endif
 
   if (night_mode){
     max_brightness = 35;
