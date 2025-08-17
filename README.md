@@ -1,112 +1,251 @@
-# Mini Clock RGB - A Simple ESPHome 7-Segment RGB Clock Kit
+# Mini Clock RGB - 7-Segment RGB Clock Projects
 
 ![clock hardware image](media/clock_hero.jpg)
 
-This example project implements a 4-digit, 7-segment style clock using an ESP32 microcontroller, an WS2812B addressable LED strip, and ESPHome. It integrates with Home Assistant for configuration and color control. 
+This repository contains **two separate implementations** of a 4-digit, 7-segment style clock using an ESP32 microcontroller and WS2812B addressable LED strips.
 
-ESPHome includes support for addressable LED lights, as well as LED matrices. But what if you want to make a 7-segment clock using RGB LEDs?
-
-All you need is to customize the YAML file to get started. It contains the settings and logic to drive a DIY clock, using ESPHome and c++ code in lambdas.
-
-The reference hardware used are custom made PCBs with WS2812 LEDs in series, but of course regular strips could be used to form the digits as well.
-
-For even cooler clocks that work with Home Assistant and ESPHome, check out [SolidDifference](https://soliddifference.com) and the [open source clock firmware](https://github.com/soliddifference/siebenuhr_core) it is based on. (disclaimer: I'm part of that collective &#9786;)
-
-![clock home assistant device panel](media/ha_panel.jpg)
+The reference hardware uses custom PCBs with WS2812 LEDs in series, but regular LED strips can be used to form the digits as well.
 
 <img src="media/two-pcbs.jpeg" width="32%" alt="the two PCBs"><img src="media/stackup.jpeg" width="32%" alt="PCBs stacked"><img src="media/transparency.jpeg" width="32%" alt="transparency with PCB">
 
-## Project Components
+## Project Options
 
-1. In the `src/` directory is a [standalone firmware](src/main.cpp) that can connect to wifi and maintain color and light levels. It does not support OTA or connect to home assistant, it's fairly simple.
-2. In the `esphome/` folder is a [self-contained YAML configuration](esphome/rgb-clock.yaml) that can be used with Home Assistant and ESPHome. 
-3. In `homeassistant/` is an example [automation](homeassistant/clock_automation.yaml) and [script](homeassistant/calculate_clock_color_script.yaml) that will change the color of the clock throughout the day by storing an Hue/Saturation value in a text helper.
+Choose the implementation that best fits your needs:
 
+### 1. 🚀 **Standalone PlatformIO Firmware** (Recommended for beginners)
+- **Location:** [`src/main.cpp`](src/main.cpp)
+- **Platform:** PlatformIO with Arduino framework
+- **Features:** Basic WiFi clock with automatic failover to random number mode
+- **Dependencies:** No Home Assistant required
+- **Setup:** Simple WiFiManager configuration via captive portal
 
-## What It Does
+### 2. 🏠 **ESPHome + Home Assistant Integration** (Advanced features)
+- **Location:** [`esphome/rgb-clock.yaml`](esphome/rgb-clock.yaml)
+- **Platform:** ESPHome
+- **Features:** Full Home Assistant integration with advanced color/brightness controls
+- **Dependencies:** Requires Home Assistant and ESPHome
+- **Setup:** YAML configuration with OTA updates
 
-*   Displays colorful time in HH:MM format using 4x 7-segment digits.
-*   Uses a BH1750 ambient light sensor with smoothing filter for automatic brightness adjustment.
-*   Configurable day maximum brightness and night target brightness via Home Assistant `number` entities.
-*   Configurable lux threshold for switching between day and night modes via a Home Assistant `number` entity.
-*   Manual enable/disable of automatic night mode dimming via a Home Assistant `switch`.
-*   Manual color selection via a Home Assistant RGB light entity (`light.clock_color`).
-*   The HA light's brightness slider acts as a master brightness scale factor, applied on top of the ambient calculation (primarily affecting day mode, night mode uses its own target).
-*   Turning the HA light entity ON/OFF triggers a configurable fade-in/fade-out effect for the clock display.
-*   Digital dimming technique for very low brightness levels (1-3) when night mode is active.
-*   Reports the final calculated brightness (0-255) via a `sensor` entity.
-*   Reports whether night mode logic is currently active via a `binary_sensor` entity.
+---
 
 ## Hardware Requirements
 
-*   ESP32 Development Board
-*   WS2812B Addressable LED Strip (configured for 84 LEDs, 3 per segment)
-*   BH1750 Ambient Light Sensor
-*   Appropriate power supply for ESP32 and LED strip
-*   Wiring (connecting sensor via I2C, LED strip data pin)
+**Required Components:**
+- ESP32 Development Board (tested: ESP32 DevKit, Seeed XIAO ESP32S3)
+- WS2812B Addressable LED Strip (84 LEDs total: 4 digits × 7 segments × 3 LEDs per segment)
+- 5V Power Supply (adequate for ESP32 and LED strip)
+- Jumper wires for connections
 
-## Software Requirements
+**Optional Components:**
+- BH1750 Ambient Light Sensor (I2C) - for automatic brightness adjustment
 
-*   [ESPHome](https://esphome.io/)
-*   [Home Assistant](https://www.home-assistant.io/) (for full functionality)
+**Wiring:**
+- LED Strip Data Pin → ESP32 GPIO 5 (configurable in platformio.ini)
+- LED Strip 5V → Power Supply 5V
+- LED Strip GND → Power Supply GND and ESP32 GND
+- ESP32 VIN → Power Supply 5V (if using 5V supply)
+- BH1750 SDA → ESP32 GPIO 21 (if using light sensor)
+- BH1750 SCL → ESP32 GPIO 22 (if using light sensor)
+- BH1750 VCC → ESP32 3.3V
+- BH1750 GND → ESP32 GND
+
+---
+
+# 🚀 Option 1: Standalone PlatformIO Firmware
+
+## What This Firmware Does
+
+The standalone firmware provides a simple, reliable clock implementation:
+
+**Core Features:**
+- **WiFi Time Sync:** Connects to WiFi and syncs time via NTP
+- **Automatic Failover:** If WiFi fails, displays random colorful numbers (0000-9999)
+- **Colorful Display:** Each digit shows in different colors with smooth animations
+- **Easy Setup:** Uses WiFiManager for simple WiFi configuration via captive portal
+- **Auto-Reconnect:** Attempts to reconnect to WiFi every 60 seconds when in random mode
+- **Visual Feedback:** LED animations during time sync and connection attempts
+
+**Optional Features (compile-time enabled):**
+- **BH1750 Light Sensor:** Automatic brightness adjustment based on ambient light
+- **Night Mode:** Automatic dimming in low light conditions
 
 ## Setup Instructions
 
-1.  **Clone Repository:**
-    ```bash
-    git clone <repository-url>
-    cd mini-clock-rgb
-    ```
+### 1. Install PlatformIO
+- Install [PlatformIO IDE](https://platformio.org/platformio-ide) or [PlatformIO Core](https://platformio.org/install/cli)
 
-2.  **Configure Secrets:**
-    *   Navigate to the `esphome` directory.
-    *   Rename `secrets-example.yaml` to `secrets.yaml`.
-    *   Edit `secrets.yaml` and fill in your specific Wi-Fi credentials, Home Assistant API key, desired OTA password, and timezone. See comments in the file for details.
+### 2. Clone and Build
+```bash
+git clone <repository-url>
+cd mini-clock-rgb
+pio run -t upload
+```
 
-3.  **(Optional) Adjust Pin Configuration:**
-    *   Open `esphome/rgb-clock.yaml`.
-    *   Review the `substitutions:` section near the bottom.
-    *   Change `led_pin`, `i2c_sda_pin`, `i2c_scl_pin`, and `bh1750_address` to match your specific hardware setup if different from the defaults.
-    *   Adjust `leds_per_segment` if your clock uses a different number of LEDs for each segment line (default is 3).
-    *   **IMPORTANT:** If you change `leds_per_segment`, you **must** manually recalculate and update `num_leds` accordingly. The formula is `num_leds = 4 * 7 * leds_per_segment` (4 digits, 7 segments per digit).
+### 3. WiFi Configuration
+1. After flashing, the ESP32 will create a WiFi access point named **"Mini Clock RGB"**
+2. Connect to this AP with your phone/computer
+3. A captive portal will open automatically (or go to 192.168.4.1)
+4. Select your WiFi network and enter the password
+5. The clock will connect and start displaying time
 
-4.  **Compile and Upload:**
-    *   Using the ESPHome tool (command line or HA Add-on/Dashboard):
-        ```bash
-        esphome run esphome/rgb-clock.yaml
-        ```
-    *   Follow the prompts to compile and upload the firmware to your ESP32 via USB for the first time. Subsequent updates can use OTA.
+### 4. Optional: Enable Light Sensor
+To enable the BH1750 light sensor support:
 
-5.  **Integrate with Home Assistant:**
-    *   Once the device connects to your network, Home Assistant should automatically discover it.
-    *   Alternatively, go to Settings -> Devices & Services -> Add Integration and search for ESPHome. Enter the device name (`mini-clock-rgb` unless changed) or IP address.
+**Method A:** Edit `src/main.cpp` and change:
+```cpp
+#define BH1750_ENABLED 0
+```
+to:
+```cpp
+#define BH1750_ENABLED 1
+```
 
-## Home Assistant Configuration
+**Method B:** Add to `platformio.ini` build flags:
+```ini
+build_flags = -D BH1750_ENABLED=1
+```
 
-Once integrated, the clock exposes the following entities in Home Assistant:
+### 5. Supported Boards
+The firmware is tested on:
+- **ESP32 DevKit V1** (default)
+- **Seeed XIAO ESP32S3**
 
-*   **Light (`light.clock_color`):**
-    *   Controls the base color of the clock digits.
-    *   Turning this entity ON/OFF triggers a fade-in/fade-out sequence for the clock display.
-    *   The brightness slider sets a scaling factor (0.0-1.0) that is multiplied with the ambient-light-derived brightness, primarily affecting day mode brightness. Setting it low will dim the clock even during the day. (Night mode uses its own target brightness).
-*   **Switch (`switch.night_mode_enabled`):**
-    *   Turn ON to allow the clock to automatically switch to the `night_target_brightness` when ambient light drops below `lux_night_threshold`.
-    *   Turn OFF to force the clock to always use the day mode logic (ambient scaled by HA brightness slider).
-*   **Number (`number.day_max_brightness`):**
-    *   Sets the maximum brightness level (1-255) the clock will reach during the day when ambient light is high and the HA brightness slider is at 100%.
-*   **Number (`number.night_target_brightness`):**
-    *   Sets the target brightness level (1-255) used when night mode is active (requires `switch.night_mode_enabled` to be ON and lux below threshold). Low values (1-3) activate digital dimming.
-*   **Number (`number.lux_night_threshold`):**
-    *   Sets the ambient light level (in lux) below which night mode *can* activate (if the `switch.night_mode_enabled` is ON).
-*   **Sensor (`sensor.ambient_light`):**
-    *   Displays the current reading from the BH1750 sensor (after filtering).
-*   **Sensor (`sensor.clock_actual_brightness`):**
-    *   Displays the final calculated brightness level (0-255) being applied to the LEDs after considering ambient light, HA brightness scale, night mode, and fades.
-*   **Binary Sensor (`binary_sensor.clock_night_mode_active`):**
-    *   Indicates `ON` if night mode dimming is currently active (i.e., switch is enabled AND ambient is below threshold AND calculated ambient brightness is below night target), `OFF` otherwise.
+To switch boards, use:
+```bash
+pio run -e seeed_xiao_esp32s3 -t upload
+```
 
-## Notes
+## Troubleshooting
 
-*   Make sure `secrets.yaml` is **not** committed to public repositories.
-*   The final display brightness depends on a combination of the ambient light sensor reading, the Day/Night configuration numbers, the Night Mode switch state, and the brightness level set on the `light.clock_color` entity in HA.
-*   Toggling the `light.clock_color` entity OFF/ON in HA initiates a fade sequence.
+**Clock shows random numbers instead of time:**
+- WiFi connection failed or was lost
+- Check WiFi credentials via the captive portal
+- Wait for automatic reconnection (attempts every 60 seconds)
+
+**No display at all:**
+- Check power supply (5V with adequate current)
+- Verify LED strip data pin connection (default: GPIO 5)
+- Check LED strip ground connection
+
+**Dim display:**
+- If using BH1750 sensor, check sensor wiring
+- Sensor may be reading low light levels
+
+For even cooler clocks with Home Assistant integration, check out [SolidDifference](https://soliddifference.com) and the [open source clock firmware](https://github.com/soliddifference/siebenuhr_core) it is based on. (disclaimer: I'm part of that collective &#9786;)
+
+---
+
+# 🏠 Option 2: ESPHome + Home Assistant Integration
+
+![clock home assistant device panel](media/ha_panel.jpg)
+
+## What This Implementation Does
+
+The ESPHome version provides advanced features through Home Assistant integration:
+
+**Advanced Features:**
+- **Full HA Integration:** Native Home Assistant device with multiple entities
+- **Advanced Color Control:** RGB color picker with HSV support
+- **Intelligent Brightness:** BH1750 sensor with smoothing filter for automatic adjustment
+- **Day/Night Modes:** Configurable brightness thresholds and targets
+- **Manual Override:** Switch to disable automatic brightness adjustment
+- **Fade Effects:** Smooth fade-in/fade-out when toggling the display
+- **Digital Dimming:** Ultra-low brightness levels (1-3) for night use
+- **Real-time Monitoring:** Live brightness and night mode status reporting
+- **OTA Updates:** Over-the-air firmware updates via Home Assistant
+- **Home Assistant Automations:** Color changes throughout the day via included scripts
+
+## Software Requirements
+
+- [ESPHome](https://esphome.io/) (Add-on or standalone)
+- [Home Assistant](https://www.home-assistant.io/) with ESPHome integration
+
+## Setup Instructions
+
+### 1. Clone Repository
+```bash
+git clone <repository-url>
+cd mini-clock-rgb
+```
+
+### 2. Configure Secrets
+- Navigate to the `esphome` directory
+- Rename `secrets-example.yaml` to `secrets.yaml`
+- Edit `secrets.yaml` with your specific settings:
+  - WiFi credentials
+  - Home Assistant API key
+  - OTA password
+  - Timezone (see comments in file)
+
+### 3. (Optional) Hardware Configuration
+Open `esphome/rgb-clock.yaml` and review the `substitutions:` section:
+- `led_pin`: LED strip data pin (default: GPIO 5)
+- `i2c_sda_pin`: I2C SDA pin for BH1750 (default: GPIO 21)
+- `i2c_scl_pin`: I2C SCL pin for BH1750 (default: GPIO 22)
+- `bh1750_address`: I2C address of BH1750 sensor (default: 0x23)
+- `leds_per_segment`: LEDs per segment line (default: 3)
+
+**⚠️ Important:** If changing `leds_per_segment`, update `num_leds` using: `num_leds = 4 × 7 × leds_per_segment`
+
+### 4. Compile and Upload
+Using ESPHome (command line or HA Add-on):
+```bash
+esphome run esphome/rgb-clock.yaml
+```
+- First upload requires USB connection
+- Subsequent updates use OTA
+
+### 5. Home Assistant Integration
+- Home Assistant should auto-discover the device
+- Manual integration: Settings → Devices & Services → Add Integration → ESPHome
+- Enter device name (`mini-clock-rgb`) or IP address
+
+## Home Assistant Entities
+
+Once integrated, the clock exposes these entities:
+
+**🎨 Light Control:**
+- **`light.clock_color`** - RGB color picker and master brightness control
+  - Color selection for clock digits
+  - ON/OFF triggers fade-in/fade-out effects
+  - Brightness slider scales ambient-adjusted brightness
+
+**🌙 Brightness Management:**
+- **`switch.night_mode_enabled`** - Enable/disable automatic night mode
+- **`number.day_max_brightness`** - Maximum brightness (1-255) for day mode
+- **`number.night_target_brightness`** - Target brightness (1-255) for night mode
+- **`number.lux_night_threshold`** - Ambient light threshold (lux) for night mode
+
+**📊 Monitoring:**
+- **`sensor.ambient_light`** - Current BH1750 sensor reading (filtered)
+- **`sensor.clock_actual_brightness`** - Final calculated LED brightness (0-255)
+- **`binary_sensor.clock_night_mode_active`** - Night mode status indicator
+
+## Home Assistant Automations
+
+The repository includes example automations in the `homeassistant/` directory:
+
+- **`clock_automation.yaml`** - Changes clock color throughout the day
+- **`calculate_clock_color_script.yaml`** - Script for color calculations based on time
+
+To use these:
+1. Copy the files to your Home Assistant configuration directory
+2. Create a text helper entity for storing HSV values
+3. Restart Home Assistant to load the automations
+
+## Important Notes
+
+- **Security:** Never commit `secrets.yaml` to public repositories
+- **Brightness Logic:** Final brightness combines ambient sensor, HA brightness slider, and day/night settings
+- **Digital Dimming:** Very low brightness values (1-3) use special digital dimming for ultra-dim display
+- **Fade Effects:** Toggling the light entity ON/OFF triggers smooth transitions
+
+---
+
+## Support & Community
+
+For even cooler clocks with Home Assistant integration, check out [SolidDifference](https://soliddifference.com) and the [open source clock firmware](https://github.com/soliddifference/siebenuhr_core) it is based on. (disclaimer: I'm part of that collective &#9786;)
+
+## License & Contributing
+
+This project is open source. Feel free to contribute improvements, bug fixes, or additional features via pull requests.
