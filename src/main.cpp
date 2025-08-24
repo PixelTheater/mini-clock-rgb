@@ -68,6 +68,13 @@ static const uint8_t digits[] = {
   0b00111111, // 9
 };
 
+// Additional characters for display
+static const uint8_t letters[] = {
+  0b01111111, // A (index 0)
+  0b01100111, // P (index 1)
+  0b00000000, // SPACE (index 2)
+};
+
 // Time 
 tm timeinfo;
 time_t now;
@@ -77,6 +84,13 @@ int second = 0;
 
 // Time, date, and tracking state
 int last_minute=0;
+
+// Button handling for WiFiManager
+#define BOOT_BUTTON_PIN 0
+#define BUTTON_HOLD_TIME 5000  // 5 seconds in milliseconds
+bool config_mode_active = false;
+unsigned long button_press_start = 0;
+bool button_was_pressed = false;
 
 
 
@@ -141,19 +155,97 @@ bool getNTPtime(int sec) {
   }
 }
 
+void show_letter(uint8_t digit, uint8_t letter_index){
+  int offset = digit * LEDS_PER_DIGIT;
+  uint16_t color = 120; // Blue color for AP mode
+  
+  for (int i=0; i<7; i++){
+    for (int pos=0; pos<3; pos++){
+      int led_num = offset + i*3 + pos;
+      brightness = global_brightness;
+      
+      if (letters[letter_index] & (1 << i)){
+        if (pos == 1){
+          leds[led_num] = CHSV(color, 240, brightness);
+        } else {
+          leds[led_num] = CHSV(color, 240, brightness * 0.6);
+        }
+      } else {
+        leds[led_num] = CRGB::Black;
+      }
+    }
+  }
+}
+
+void display_ap_mode(){
+  // Clear all LEDs first
+  FastLED.clear();
+  
+  // Display "AP" - A on digit 3, P on digit 2, spaces on digits 1 and 0
+  show_letter(3, 0); // A
+  show_letter(2, 1); // P
+  show_letter(1, 2); // SPACE
+  show_letter(0, 2); // SPACE
+}
+
+void check_button_for_config_mode() {
+  bool button_pressed = (digitalRead(BOOT_BUTTON_PIN) == LOW);
+  
+  if (button_pressed && !button_was_pressed) {
+    // Button just pressed
+    button_press_start = millis();
+    button_was_pressed = true;
+    Serial.println("Boot button pressed");
+  } else if (!button_pressed && button_was_pressed) {
+    // Button just released
+    button_was_pressed = false;
+    Serial.println("Boot button released");
+  } else if (button_pressed && button_was_pressed) {
+    // Button is being held
+    unsigned long hold_time = millis() - button_press_start;
+    if (hold_time >= BUTTON_HOLD_TIME && !config_mode_active) {
+      // Button held for 5 seconds - enter config mode
+      Serial.println("Boot button held for 5 seconds - entering WiFi config mode");
+      config_mode_active = true;
+      
+      // Reset WiFiManager settings and start config portal
+      wm.resetSettings();
+      wm.setConfigPortalTimeout(0); // No timeout for manual config mode
+      
+      // Start config portal
+      if (!wm.startConfigPortal("Mini Clock RGB Config")) {
+        Serial.println("Failed to start config portal");
+        config_mode_active = false;
+      }
+    }
+  }
+}
+
 void configModeCallback (WiFiManager *myWiFiManager) {
   Serial.println("Entered config mode");
   Serial.println(WiFi.softAPIP());
   Serial.println(wm.getConfigPortalSSID());
+  config_mode_active = true;
+}
+
+void saveWifiCallback() {
+  Serial.println("WiFi credentials saved, exiting config mode");
+  config_mode_active = false;
+  wifi_connected = true;
 }
 
 void ConnectToWifi(){
   Serial.print("Connecting to WiFi");
   WiFi.mode(WIFI_STA);
   wm.setAPCallback(configModeCallback);
+  wm.setSaveConfigCallback(saveWifiCallback);
 
-  // Set timeout for WiFiManager to prevent indefinite blocking
-  wm.setConfigPortalTimeout(30); // 30 seconds timeout
+  // Set timeout for WiFiManager to prevent indefinite blocking (only for auto-connect)
+  if (!config_mode_active) {
+    wm.setConfigPortalTimeout(30); // 30 seconds timeout for auto-connect
+  } else {
+    wm.setConfigPortalTimeout(0); // No timeout for manual config mode
+  }
   
   //wm.resetSettings();   // uncomment to force a reset
   wifi_connected = wm.autoConnect("Mini Clock RGB");
@@ -177,6 +269,12 @@ void ConnectToWifi(){
       Serial.println("Time sync complete");
     } else {
       Serial.println("Error: NTP time update failed!");
+    }
+    
+    // If we were in config mode and successfully connected, exit config mode
+    if (config_mode_active) {
+      config_mode_active = false;
+      Serial.println("Exiting config mode - WiFi connected successfully");
     }
   } else {
     Serial.println("ERROR: WiFi connect failure");
@@ -326,6 +424,20 @@ void display_random_numbers(){
 
 
 void loop() {
+  // Check button for config mode (only when not already in config mode)
+  if (!config_mode_active) {
+    check_button_for_config_mode();
+  }
+  
+  // Handle WiFiManager process if in config mode
+  if (config_mode_active) {
+    wm.process(); // Handle captive portal
+    display_ap_mode();
+    FastLED.show();
+    delay(100); // Reduce CPU usage in config mode
+    return; // Don't execute normal clock logic
+  }
+  
   // Check if WiFi is still connected (in case it drops after initial connection)
   if (wifi_connected && !WiFi.isConnected()) {
     wifi_connected = false;
